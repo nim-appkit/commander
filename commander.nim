@@ -2,6 +2,29 @@ import parseopt2
 import strutils
 import tables
 import macros
+import sequtils
+from terminal import nil
+
+proc trim(s: string): string =
+  var n: string
+
+  # Trim left.
+  for i, c in s:
+    if c in Whitespace or c in NewLines:
+      continue
+    n = s[i..s.len()]
+    break
+  
+  # Trim right.
+  var i = n.len() -1
+  while i >= 0:
+    if n[i] in Whitespace or n[i] in NewLines:
+      i -= 1
+      continue
+    n = n[0..i]
+    break
+
+  return n
 
 type
   ValueKind = enum
@@ -27,6 +50,9 @@ type
 proc newValue(v: int): Value =
   Value(kind: INT_VALUE, intVal: BiggestInt(v))
 
+proc newValue(v: BiggestInt): Value =
+  Value(kind: INT_VALUE, intVal: v)
+
 proc newValue(v: float): Value =
   Value(kind: FLOAT_VALUE, floatVal: BiggestFloat(v))
 
@@ -35,6 +61,39 @@ proc newValue(v: bool): Value =
 
 proc newValue(v: string): Value =
   Value(kind: STRING_VALUE, strVal: v)
+
+proc newValue(kind: ValueKind, arg, name: string): Value =
+  case kind
+    of INT_VALUE:
+      try:
+        var i = parseBiggestInt(arg)
+        return newValue(i)
+      except:
+        raise newException(Exception, "Argument $2 must be a number." % [name])
+
+    of FLOAT_VALUE:
+      try:
+        var f = parseFloat(arg)
+        return newValue(f)
+      except:
+        raise newException(Exception, "Argument $2 must be a decimal number." % [name])
+
+    of STRING_VALUE:
+      return newValue(arg)
+
+    of BOOL_VALUE:
+      case arg.toLower()
+      of "1", "y", "yes", "true":
+        return newValue(true)
+      of "0", "n", "no", "false", "":
+        return newValue(false)
+      else:
+        raise newException(
+          Exception, 
+          "Argument $2 must be a yes/no value. (yes/no, y/n, true/false, 1/0)." % [name]
+        )
+    of NO_VALUE:
+      return Value(kind: NO_VALUE)
 
 type Flag = ref object
   longName: string
@@ -51,27 +110,22 @@ type Arg = ref object
   required: bool
   default: Value
 
-###########
-# CmdData #
-###########
+type HandlerFunc = proc(args, flags: Table[string, Value], extraArgs: openArray[string])
 
-type CmdData = ref object of RootObj
-  flags: Table[string, Value]
-  args: Table[string, Value]
-  extraArgs: seq[string]
 
 ########
 # Cmd. #
 ########
+
 
 type Cmd = ref object of RootObj
   name: string
   description: string
   help: string
   flags: Table[string, Flag]
-  args: Table[string, Arg]
+  args: OrderedTable[string, Arg]
   extraArgs: bool
-  handler: proc(data: CmdData)
+  handler: HandlerFunc
   subcommands: Table[string, Cmd]
 
 # Setters.
@@ -95,7 +149,7 @@ proc addCmd(c: Cmd, subc: Cmd): Cmd =
   c.subcommands[subc.name] = subc
   return c
 
-proc handler(c: Cmd, handler: proc(data: CmdData)) =
+proc handler(c: Cmd, handler: HandlerFunc) =
   c.handler = handler
 
 # Flag procs.
@@ -149,16 +203,37 @@ proc floatArg*(c: Cmd, name: string, description: string = "", required: bool = 
     defVal = newValue(default)
   return c.arg(name, description, FLOAT_VALUE, required, defVal)
 
+proc flagByShortName(c: Cmd, shortName: string): Flag =
+  for flag in c.flags.values:
+    if flag.shortName == shortName:
+      return flag
+
+  return nil
+
+proc buildHelp(c: Cmd): string =
+  result = c.help
+
+
 proc newCommand*(name: string, description: string = "", help: string = "", extraArgs: bool = false): Cmd =
   Cmd(
     `name`: name,
     `description`: description,
     `help`: help,
     `extraArgs`: extraArgs,
-    flags: initTable[string, Flag](),
-    args: initTable[string, Arg](),
-    subcommands: initTable[string, Cmd]()
+    flags: initTable[string, Flag](4),
+    args: initOrderedTable[string, Arg](4),
+    subcommands: initTable[string, Cmd](4)
   )
+
+###########
+# CmdData #
+###########
+
+type CmdData = ref object of RootObj
+  flags: Table[string, Value]
+  args: Table[string, Value]
+  extraArgs: seq[string]
+  cmd: Cmd
 
 ########
 # Cmdr #
@@ -173,10 +248,144 @@ proc newCommander*(name: string, description: string = "", help: string = "", ex
     `description`: description,
     `help`: help,
     `extraArgs`: extraArgs,
-    flags: initTable[string, Flag](),
-    args: initTable[string, Arg](),
-    subcommands: initTable[string, Cmd]()
+    flags: initTable[string, Flag](4),
+    args: initOrderedTable[string, Arg](4),
+    subcommands: initTable[string, Cmd](4)
   )
+
+proc writeError(err: string) =
+  terminal.styledEcho(terminal.fgRed, "Error: ", terminal.fgWhite, err)
+
+proc buildData(c: Cmdr): CmdData  =
+  var data = CmdData(
+    args: initTable[string, Value](4),
+    flags: initTable[string, Value](4),
+    extraArgs: newSeq[string]()
+  )
+
+  # Read OS arguments with parseopt2.
+
+  var args = newSeq[string]()
+  var flags = initTable[string, string](4)
+  var shortFlags = initTable[string, string](4)
+
+  for kind, key, val in getopt():
+    case kind
+    of cmdArgument:
+      args.add(key)
+    of cmdLongOption:
+      flags[key] = val
+    of cmdShortOption:
+      shortFlags[key] = val
+    of cmdEnd:  assert(false) # cannot happen 
+
+  # Determine command and check arguments.
+  var cmd: Cmd = c
+
+  let orderedArgs = toSeq(cmd.args.values)
+
+  for key, arg in args:
+    let trimmed = trim(arg) 
+    if cmd.subcommands.contains(trimmed):
+      # Subcommand found.
+      cmd = cmd.subcommands[trimmed]
+      continue
+
+    # No subcommand found, so assume a regular argument.
+    if data.args.len() < cmd.args.len():
+      var argSpec = orderedArgs[data.args.len()]
+      # Build argument value.
+      # Note: throws exception if values are incompatible.
+      data.args[argSpec.name] = newValue(argSpec.kind, arg, argSpec.name)
+    else:
+      # No more arguments configured.
+      if cmd.extraArgs:
+        # Extra args allowed, so add the arg.
+        data.extraArgs.add(arg)
+      else:
+        # Invalid extra argument.
+        raise newException(Exception, "Invalid extra argument '" & arg & "'.")
+
+  # Arguments are determined now.
+
+  # Check that all arguments have been provided.
+  for argSpec in cmd.args.values:
+    if not data.args.hasKey(argSpec.name):
+      # Argument not supplied, check if it is required.
+      if argSpec.required:
+        # Arg is required, but not provided.
+        raise newException(Exception, "Missing required argument '" & argSpec.name & "'.")
+      else:
+        if argSpec.default != nil:
+          # Default value supplied, so use it.
+          data.args[argSpec.name] = argSpec.default
+        else:
+          # No default value, so use the zero value.
+          var value = Value(kind: argSpec.kind)
+          if argSpec.kind == STRING_VALUE:
+            # Set empty string to prevent nil pointer problems.
+            value.strVal = ""
+          data.args[argSpec.name] = value
+
+  # Process flags.
+  for name, val in flags:
+    if not cmd.flags.hasKey(name):
+      # Invalid flag.
+      raise newException(Exception, "Unknown flag: '--" & name & "'.")
+
+    # Valid flag.
+    let flagSpec = cmd.flags[name]
+    var flagVal = val
+    if flagSpec.kind == BOOL_VALUE and val == "":
+      flagVal = "yes"
+    data.flags[name] = newValue(flagSpec.kind, flagVal, name)
+
+  # Process short flags.
+  for name, val in shortFlags:
+    let flagSpec = cmd.flagByShortName(name)
+    if flagSpec == nil:
+       # Invalid flag.
+      raise newException(Exception, "Unknown flag: '-" & name & "'.")
+
+    # Valid flag.
+    data.flags[name] = newValue(flagSpec.kind, val, name)
+
+  # Check flags.
+  for spec in cmd.flags.values:
+    if not data.flags.hasKey(spec.longName):
+      if spec.required:
+        raise newException(Exception, "Missing required flag '--" & spec.longName & "'.")
+
+      # Flag not required, so set default value.
+      if spec.default != nil:
+        # Default value supplied, so use it.
+        data.flags[spec.longName] = spec.default
+      else:
+        # No default value, so use the zero value.
+        var value = Value(kind: spec.kind)
+        if spec.kind == STRING_VALUE:
+          # Set empty string to prevent nil pointer problems.
+          value.strVal = ""
+        data.flags[spec.longName] = value
+    else:
+      # Ensure that the value is correct.
+      if spec.kind == STRING_VALUE and spec.required and data.flags[spec.longName].strVal == "":
+        raise newException(Exception, "Must supply non-empty value for required flag '--" & spec.longName & "'.")
+
+
+  data.cmd = cmd
+  return data
+
+proc run(c: Cmdr) =
+  var data: CmdData
+  try:
+    data = c.buildData()
+  except:
+    writeError(getCurrentExceptionMsg())
+    echo("Use -h, --help or 'help' to show usage information.")
+    quit(1)
+
+  data.cmd.handler(data.args, data.flags, data.extraArgs)
 
 #############
 # Templates #
@@ -188,31 +397,16 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
     description: "",
     help: "",
     extraArgs: false,
-    flags: initTable[string, Flag](),
-    args: initTable[string, Arg](),
-    subcommands: initTable[string, Cmd]()
+    flags: initTable[string, Flag](4),
+    args: initOrderedTable[string, Arg](4),
+    subcommands: initTable[string, Cmd](4)
   )
 
   cmdr.extend:
     body
 
-template handlerSetup(cmd: Cmd): stmt {.immediate.} =
-  result = newNimNode(nnkStmtList)
-
-  #var cmd = getPointer(cmdVal)
-
-  for name, flag in cmd.flags:
-    let def = "var $1 = data[\"$1\"]" % [name]
-    let s = parseStmt(def)
-    result.add(s)
-  for name, arg in cmd.args:
-    let def = "var $1 = data[\"$1\"]" % [name]
-    let s = parseStmt(def)
-    result.add(s)
-
-  echo(repr(result))
-
-  return result
+macro setupHandler(cmd: expr): stmt =
+  result = newStmtList()
 
 template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
   block:
@@ -230,10 +424,10 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
     template extraArgs(e: stmt): stmt {.immediate, dirty.} =
       parentCommand.extraArgs = e
 
-    template handle(handlerBody: stmt): stmt =
+    template handle(handlerBody: stmt): stmt {.immediate, dirty.} =
       block:
-        parentCommand.handler = proc(data: CmdData) =
-          handlerSetup(cmd)
+        setupHandler(parentCommand)
+        parentCommand.handler = proc(args, flags: Table[string, Value], extraArgs: openArray[string]) =
           handlerBody
 
     template flag(flagBody: stmt): stmt {.immediate, dirty.} =
@@ -315,9 +509,9 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
           description: "",
           help: "",
           extraArgs: false,
-          flags: initTable[string, Flag](),
-          args: initTable[string, Arg](),
-          subcommands: initTable[string, Cmd]()
+          flags: initTable[string, Flag](4),
+          args: initOrderedTable[string, Arg](4),
+          subcommands: initTable[string, Cmd](4)
         )
         var oldParent = parentCommand
         var parentCommand = cmd
@@ -326,6 +520,8 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
 
         if cmd.name == "":
           raise newException(Exception, "Must specify name for commands")
+        if cmd.handler == nil:
+          raise newException(Exception, "Must specify a handler for command " & cmd.name)
         discard oldParent.addCmd(cmd)
 
     body
@@ -346,16 +542,14 @@ Commander:
     required: true
     description: "flag description"
     kind: STRING_VALUE
-    default: "default"
 
   arg:
     name: "name"
     description: "descr"
     required: true
 
-
   handle:
-    echo(lala)
+    echo(args["name"].strVal)
 
   extraArgs: true
 
@@ -363,7 +557,14 @@ Commander:
     name: "subc"
     help: "sub help"
 
+    handle:
+      echo("Subc handler")
+
     Command:
       name: "subsubc"
       help: "lala"
 
+      handle:
+        echo("sub sub c handler")
+
+cmdr.run()
