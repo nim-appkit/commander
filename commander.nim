@@ -23,18 +23,32 @@ type
     of NO_VALUE:
       discard
 
+proc newValue(v: int): Value =
+  Value(kind: INT_VALUE, intVal: BiggestInt(v))
+
+proc newValue(v: float): Value =
+  Value(kind: FLOAT_VALUE, floatVal: BiggestFloat(v))
+
+proc newValue(v: bool): Value =
+  Value(kind: BOOL_VALUE, boolVal: v)
+
+proc newValue(v: string): Value =
+  Value(kind: STRING_VALUE, strVal: v)
+
 type Flag = ref object
   longName: string
   shortName: string
   description: string
   kind: ValueKind
   required: bool
+  default: Value
 
 type Arg = ref object
   name: string
   description: string
   kind: ValueKind
   required: bool
+  default: Value
 
 ########
 # Cmd. #
@@ -171,7 +185,7 @@ proc newCommander*(name: string, description: string = "", help: string = "", ex
 # Templates #
 #############
 
-template Commander(body: stmt): stmt {.immediate, dirty.} =
+template Commander*(body: stmt): stmt {.immediate, dirty.} =
   var cmdr = Cmdr(
     name: "",
     description: "",
@@ -216,6 +230,13 @@ template Commander(body: stmt): stmt {.immediate, dirty.} =
         template description(s: stmt): stmt {.immediate, dirty.} =
           f.description = s
 
+        template default(s: stmt): stmt {.immediate, dirty.} =
+          block:
+            var val = newValue(s)
+            if val.kind != f.kind:
+              raise newException(Exception, "Invalid type for for default value of flag $1: got $2 instead of $3" % [f.longName, val.kind.`$`, f.kind.`$`])
+          f.default = newValue(s)
+
         flagBody
 
         if f.longName == "":
@@ -237,6 +258,9 @@ template Commander(body: stmt): stmt {.immediate, dirty.} =
 
         template description(s: stmt): stmt {.immediate, dirty.} =
           a.description = s
+
+        template default(s: stmt): stmt {.immediate, dirty.} =
+          f.default = newValue(s)
 
         argBody
 
@@ -280,6 +304,7 @@ Commander:
     required: true
     description: "flag description"
     kind: STRING_VALUE
+    default: "default"
 
   arg:
     name: "name"
@@ -297,3 +322,4 @@ Commander:
       name: "subsubc"
       help: "lala"
 
+echo(cmdr.flags[0].default)
