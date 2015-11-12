@@ -106,6 +106,7 @@ type Flag = ref object
   kind: ValueKind
   required: bool
   default: Value
+  global: bool
 
 type Arg = ref object
   name: string
@@ -159,7 +160,7 @@ proc handler(c: Cmd, handler: HandlerFunc) =
 
 # Flag procs.
 
-proc newFlag(longName, shortName, description, help: string = "", kind: ValueKind = BOOL_VALUE, required: bool = false, default: Value = nil): Flag =
+proc newFlag(longName, shortName, description, help: string = "", kind: ValueKind = BOOL_VALUE, required: bool = false, default: Value = nil, global: bool = false): Flag =
   Flag(
     `longName`: longName, 
     `shortName`: shortName,
@@ -167,7 +168,8 @@ proc newFlag(longName, shortName, description, help: string = "", kind: ValueKin
     `help`: help,
     `kind`: kind, 
     `required`: required,
-    `default`: default
+    `default`: default,
+    `global`: global
   )
 
 proc flag*(c: Cmd, longName: string, shortName, description, help: string = "", kind: ValueKind = BOOL_VALUE, required: bool, default: Value = nil): Cmd =
