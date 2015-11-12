@@ -350,54 +350,96 @@ proc buildData(c: Cmdr): CmdData  =
 
   # Read OS arguments with parseopt2.
 
-  var args = newSeq[string]()
-  var flags = initTable[string, string](4)
-  var shortFlags = initTable[string, string](4)
-
   let opts = toSeq(getopt())
 
-  for index, row in opts:
+  var cmd: Cmd = c
+  let orderedArgs = toSeq(cmd.args.values)
+
+  var index = 0
+  while index < opts.len():
+    let row = opts[index]
     let kind = row.kind
     let key = row.key
     let val = row.val
 
+    # Increment index.
+    index += 1
+
     case kind
     of cmdArgument:
-      args.add(key)
-    of cmdLongOption:
-      flags[key] = val
-    of cmdShortOption:
-      shortFlags[key] = val
-    of cmdEnd:  assert(false) # cannot happen 
+      # Handle arguments.
 
-  # Determine command and check arguments.
-  var cmd: Cmd = c
+      let arg = trim(key) 
+      if cmd.subcommands.contains(arg):
+        # Subcommand found.
+        cmd = cmd.subcommands[arg]
+        continue
 
-  let orderedArgs = toSeq(cmd.args.values)
-
-  for key, arg in args:
-    let trimmed = trim(arg) 
-    if cmd.subcommands.contains(trimmed):
-      # Subcommand found.
-      cmd = cmd.subcommands[trimmed]
-      continue
-
-    # No subcommand found, so assume a regular argument.
-    if data.args.len() < cmd.args.len():
-      var argSpec = orderedArgs[data.args.len()]
-      # Build argument value.
-      # Note: throws exception if values are incompatible.
-      data.args[argSpec.name] = newValue(argSpec.kind, arg, argSpec.name)
-    else:
-      # No more arguments configured.
-      if cmd.extraArgs:
-        # Extra args allowed, so add the arg.
-        data.extraArgs.add(arg)
+      # No subcommand found, so assume a regular argument.
+      if data.args.len() < cmd.args.len():
+        var argSpec = orderedArgs[data.args.len()]
+        # Build argument value.
+        # Note: throws exception if values are incompatible.
+        data.args[argSpec.name] = newValue(argSpec.kind, arg, argSpec.name)
       else:
-        # Invalid extra argument.
-        raise newException(ValidationError, "Invalid extra argument '" & arg & "'.")
+        # No more arguments configured.
+        if cmd.extraArgs:
+          # Extra args allowed, so add the arg.
+          data.extraArgs.add(arg)
+        else:
+          # Invalid extra argument.
+          raise newException(ValidationError, "Invalid extra argument '" & arg & "'.")
 
-  # Arguments are determined now.
+    of cmdLongOption:
+      var name = key
+      if not cmd.flags.hasKey(name):
+        # Invalid flag.
+        raise newException(ValidationError, "Unknown flag: '--" & name & "'.")
+
+      # Valid flag.
+      let flagSpec = cmd.flags[name]
+      var flagVal = val
+      if flagSpec.kind == BOOL_VALUE and val == "":
+        flagVal = "yes"
+
+      # Ensure that the value is correct.
+      if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
+        raise newException(
+          ValidationError, 
+          "Must supply non-empty value for required flag '--" & flagSpec.longName & "'."
+        )
+
+      data.flags[name] = newValue(flagSpec.kind, flagVal, name)
+
+    of cmdShortOption:
+      var name = key
+      var val = ""
+      let flagSpec = cmd.flagByShortName(name)
+      if flagSpec == nil:
+         # Invalid flag.
+        raise newException(ValidationError, "Unknown flag: '-" & name & "'.")
+
+      # Valid flag.
+      
+      # Check if we need a value.
+      if flagSpec.kind != BOOL_VALUE:
+        # Check if additional arg is supplied.
+        # Note: index was already incremented above!!
+        if opts.len() < index or opts[index].kind != cmdArgument:
+          raise newException(Exception, "Missing value for option '-" & flagSpec.shortName & "'.")
+
+        # Set val to value of next argument.
+        val = opts[index].key
+        # Increment index to skip short option value.
+        index += 1
+
+      # Ensure that the value is correct.
+      if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
+        raise newException(ValidationError, "Must supply non-empty value for required flag '-" & name & "'.")
+
+      data.flags[flagSpec.longName] = newValue(flagSpec.kind, val, name)
+
+    of cmdEnd:  assert(false) # cannot happen 
 
   # Check that all arguments have been provided.
   for argSpec in cmd.args.values:
@@ -417,42 +459,6 @@ proc buildData(c: Cmdr): CmdData  =
             # Set empty string to prevent nil pointer problems.
             value.strVal = ""
           data.args[argSpec.name] = value
-
-  # Process flags.
-  for name, val in flags:
-    if not cmd.flags.hasKey(name):
-      # Invalid flag.
-      raise newException(ValidationError, "Unknown flag: '--" & name & "'.")
-
-    # Valid flag.
-    let flagSpec = cmd.flags[name]
-    var flagVal = val
-    if flagSpec.kind == BOOL_VALUE and val == "":
-      flagVal = "yes"
-
-    # Ensure that the value is correct.
-    if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
-      raise newException(
-        ValidationError, 
-        "Must supply non-empty value for required flag '--" & flagSpec.longName & "'."
-      )
-
-    data.flags[name] = newValue(flagSpec.kind, flagVal, name)
-
-  # Process short flags.
-  for name, val in shortFlags:
-    let flagSpec = cmd.flagByShortName(name)
-    if flagSpec == nil:
-       # Invalid flag.
-      raise newException(ValidationError, "Unknown flag: '-" & name & "'.")
-
-    # Valid flag.
-     
-    # Ensure that the value is correct.
-    if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
-      raise newException(ValidationError, "Must supply non-empty value for required flag '-" & name & "'.")
-
-    data.flags[flagSpec.longName] = newValue(flagSpec.kind, val, name)
 
   # Check flags.
   for spec in cmd.flags.values:
