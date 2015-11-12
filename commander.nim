@@ -1,6 +1,7 @@
 import parseopt2
 import strutils
 import tables
+import macros
 
 type
   ValueKind = enum
@@ -50,9 +51,9 @@ type Arg = ref object
   required: bool
   default: Value
 
-################
+###########
 # CmdData #
-################
+###########
 
 type CmdData = ref object of RootObj
   flags: Table[string, Value]
@@ -195,9 +196,23 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
   cmdr.extend:
     body
 
-template handlerSetup(cmd: Cmd): stmt =
+template handlerSetup(cmd: Cmd): stmt {.immediate.} =
   result = newNimNode(nnkStmtList)
 
+  #var cmd = getPointer(cmdVal)
+
+  for name, flag in cmd.flags:
+    let def = "var $1 = data[\"$1\"]" % [name]
+    let s = parseStmt(def)
+    result.add(s)
+  for name, arg in cmd.args:
+    let def = "var $1 = data[\"$1\"]" % [name]
+    let s = parseStmt(def)
+    result.add(s)
+
+  echo(repr(result))
+
+  return result
 
 template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
   block:
@@ -217,8 +232,9 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
 
     template handle(handlerBody: stmt): stmt =
       block:
-        handlerSetup(cmd)
-        handlerBody
+        parentCommand.handler = proc(data: CmdData) =
+          handlerSetup(cmd)
+          handlerBody
 
     template flag(flagBody: stmt): stmt {.immediate, dirty.} =
       block:
@@ -338,6 +354,9 @@ Commander:
     required: true
 
 
+  handle:
+    echo(lala)
+
   extraArgs: true
 
   Command:
@@ -348,4 +367,3 @@ Commander:
       name: "subsubc"
       help: "lala"
 
-echo(cmdr.flags)
