@@ -10,7 +10,7 @@ type
     STRING_VALUE
     BOOL_VALUE
 
-  Value = object
+  Value = ref object
     case kind: ValueKind
     of INT_VALUE:
       intVal: BiggestInt
@@ -50,6 +50,15 @@ type Arg = ref object
   required: bool
   default: Value
 
+################
+# CmdData #
+################
+
+type CmdData = ref object of RootObj
+  flags: Table[string, Value]
+  args: Table[string, Value]
+  extraArgs: seq[string]
+
 ########
 # Cmd. #
 ########
@@ -58,10 +67,10 @@ type Cmd = ref object of RootObj
   name: string
   description: string
   help: string
-  flags: seq[Flag]
-  args: seq[Arg]
+  flags: Table[string, Flag]
+  args: Table[string, Arg]
   extraArgs: bool
-
+  handler: proc(data: CmdData)
   subcommands: Table[string, Cmd]
 
 # Setters.
@@ -85,72 +94,59 @@ proc addCmd(c: Cmd, subc: Cmd): Cmd =
   c.subcommands[subc.name] = subc
   return c
 
+proc handler(c: Cmd, handler: proc(data: CmdData)) =
+  c.handler = handler
+
 # Flag procs.
 
-proc flag*(c: Cmd, longName: string, shortName, description: string = "", kind: ValueKind = BOOL_VALUE, required: bool): Cmd =
+proc flag*(c: Cmd, longName: string, shortName, description: string = "", kind: ValueKind = BOOL_VALUE, required: bool, default: Value = nil): Cmd =
   var f = Flag(
     `longName`: longName, 
     `shortName`: shortName,
     `description`: description,
     `kind`: kind, 
-    `required`: required
+    `required`: required,
+    `default`: default
   )
-  c.flags.add(f)
+  c.flags[f.longName] = f
   return c
 
-proc strFlag*(c: Cmd, longName: string, shortName, description: string = "", required: bool): Cmd =
-  var f = Flag(
-    `longName`: longName, 
-    `shortName`: shortName,
-    `description`: description,
-    `kind`: STRING_VALUE, 
-    `required`: required
-  )
-  c.flags.add(f)
-  return c
+proc strFlag*(c: Cmd, longName: string, shortName, description: string = "", required: bool, default: string = "nodefault"): Cmd =
+  var defVal: Value = nil
+  if default != "nodefault":
+    defVal = newValue(default)
+  return c.flag(longName, shortName, description, STRING_VALUE, required, defVal)
 
-proc intFlag*(c: Cmd, longName: string, shortName, description: string = "", required: bool): Cmd =
-  var f = Flag(
-    `longName`: longName, 
-    `shortName`: shortName,
-    `description`: description,
-    `kind`: INT_VALUE, 
-    `required`: required
-  )
-  c.flags.add(f)
-  return c
+proc intFlag*(c: Cmd, longName: string, shortName, description: string = "", required: bool, default: int = -1111): Cmd =
+  var defVal: Value = nil
+  if default != -1111:
+    defVal = newValue(default)
+  return c.flag(longName, shortName, description, INT_VALUE, required, defVal)
 
 # Arg procs.
 
-proc arg*(c: Cmd, name: string, description: string = "", kind: ValueKind = STRING_VALUE, required: bool = false): Cmd =
+proc arg*(c: Cmd, name: string, description: string = "", kind: ValueKind = STRING_VALUE, required: bool = false, default: Value): Cmd =
   var a = Arg(
     `name`: name,
     `description`: description,
     `kind`: kind,
-    `required`: required
+    `required`: required,
+    `default`: default
   )
-  c.args.add(a)
+  c.args[a.name] = a
   return c
 
-proc intArg*(c: Cmd, name: string, description: string = "", required: bool = false): Cmd =
-  var a = Arg(
-    `name`: name,
-    `description`: description,
-    `kind`: INT_VALUE,
-    `required`: required
-  )
-  c.args.add(a)
-  return c
+proc intArg*(c: Cmd, name: string, description: string = "", required: bool = false, default: int = -1111): Cmd =
+  var defVal: Value = nil
+  if default != -1111:
+    defVal = newValue(default)
+  return c.arg(name, description, INT_VALUE, required, defVal)
 
-proc floatArg*(c: Cmd, name: string, description: string = "", required: bool = false): Cmd =
-  var a = Arg(
-    `name`: name,
-    `description`: description,
-    `kind`: FLOAT_VALUE,
-    `required`: required
-  )
-  c.args.add(a)
-  return c
+proc floatArg*(c: Cmd, name: string, description: string = "", required: bool = false, default: float = -1111): Cmd =
+  var defVal: Value = nil
+  if default != -1111:
+    defVal = newValue(default)
+  return c.arg(name, description, FLOAT_VALUE, required, defVal)
 
 proc newCommand*(name: string, description: string = "", help: string = "", extraArgs: bool = false): Cmd =
   Cmd(
@@ -158,8 +154,8 @@ proc newCommand*(name: string, description: string = "", help: string = "", extr
     `description`: description,
     `help`: help,
     `extraArgs`: extraArgs,
-    flags: newSeq[Flag](),
-    args: newSeq[Arg](),
+    flags: initTable[string, Flag](),
+    args: initTable[string, Arg](),
     subcommands: initTable[string, Cmd]()
   )
 
@@ -176,8 +172,8 @@ proc newCommander*(name: string, description: string = "", help: string = "", ex
     `description`: description,
     `help`: help,
     `extraArgs`: extraArgs,
-    flags: newSeq[Flag](),
-    args: newSeq[Arg](),
+    flags: initTable[string, Flag](),
+    args: initTable[string, Arg](),
     subcommands: initTable[string, Cmd]()
   )
 
@@ -191,13 +187,21 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
     description: "",
     help: "",
     extraArgs: false,
-    flags: newSeq[Flag](),
-    args: newSeq[Arg](),
+    flags: initTable[string, Flag](),
+    args: initTable[string, Arg](),
     subcommands: initTable[string, Cmd]()
   )
-  var parentCommand: Cmd = cmdr
 
+  cmdr.extend:
+    body
+
+template handlerSetup(cmd: Cmd): stmt =
+  result = newNimNode(nnkStmtList)
+
+
+template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
   block:
+    var parentCommand: Cmd = cmdr
     template name(s: stmt): stmt {.immediate, dirty.} =
       parentCommand.name = s
 
@@ -211,9 +215,14 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
     template extraArgs(e: stmt): stmt {.immediate, dirty.} =
       parentCommand.extraArgs = e
 
+    template handle(handlerBody: stmt): stmt =
+      block:
+        handlerSetup(cmd)
+        handlerBody
+
     template flag(flagBody: stmt): stmt {.immediate, dirty.} =
       block:
-        var f = Flag(kind: BOOL_VALUE)
+        var f = Flag(kind: BOOL_VALUE, longName: "")
 
         template longName(s: stmt): stmt {.immediate, dirty.} =
           f.longName = s
@@ -235,17 +244,23 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
             var val = newValue(s)
             if val.kind != f.kind:
               raise newException(Exception, "Invalid type for for default value of flag $1: got $2 instead of $3" % [f.longName, val.kind.`$`, f.kind.`$`])
-          f.default = newValue(s)
+
+            f.default = val
 
         flagBody
 
         if f.longName == "":
           raise newException(Exception, "Must set a longName for flags (command $1)!" % [parentCommand.name])
-        parentCommand.flags.add(f)
+        if parentCommand.flags.contains(f.longName):
+          raise newException(Exception, "Duplicate flag longName '$1' for command $2" % [f.longName, parentCommand.name])
+        if parentCommand.args.contains(f.longName):
+          raise newException(Exception, "Cant specify a flag with a longName that exists as argument (command $1, flag $2)" % [parentCommand.name, f.longName])
+
+        parentCommand.flags[f.longName] = f
 
     template arg(argBody: stmt): stmt {.immediate, dirty.} =
       block:
-        var a = Arg(kind: STRING_VALUE)
+        var a = Arg(kind: STRING_VALUE, name: "")
 
         template name(s: stmt): stmt {.immediate, dirty.} =
           a.name = s
@@ -260,11 +275,22 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
           a.description = s
 
         template default(s: stmt): stmt {.immediate, dirty.} =
-          f.default = newValue(s)
+          block:
+            var val = newValue(s)
+            if val.kind != a.kind:
+              raise newException(Exception, "Invalid type for for default value of argument $1: got $2 instead of $3" % [a.name, val.kind.`$`, a.kind.`$`])
+            f.default = val
 
         argBody
 
-        parentCommand.args.add(a)
+        if a.name == "":
+          raise newException(Exception, "Must set a name for arguments (command $1)!" % [parentCommand.name])
+        if parentCommand.args.contains(a.name):
+          raise newException(Exception, "Duplicate argument name '$1' for command $2" % [a.name, parentCommand.name])
+        if parentCommand.flags.contains(a.name):
+          raise newException(Exception, "Cant specify an argument with a name that exists as argument longName (command $1, arg $2)" % [parentCommand.name, a.name])
+
+        parentCommand.args[a.name] = a
 
     template Command(cmdBody: stmt): stmt {.immediate, dirty.} =
       block:
@@ -273,8 +299,8 @@ template Commander*(body: stmt): stmt {.immediate, dirty.} =
           description: "",
           help: "",
           extraArgs: false,
-          flags: newSeq[Flag](),
-          args: newSeq[Arg](),
+          flags: initTable[string, Flag](),
+          args: initTable[string, Arg](),
           subcommands: initTable[string, Cmd]()
         )
         var oldParent = parentCommand
@@ -322,4 +348,4 @@ Commander:
       name: "subsubc"
       help: "lala"
 
-echo(cmdr.flags[0].default)
+echo(cmdr.flags)
