@@ -172,7 +172,16 @@ proc newFlag(longName, shortName, description, help: string = "", kind: ValueKin
     `global`: global
   )
 
-proc flag*(c: Cmd, longName: string, shortName, description, help: string = "", kind: ValueKind = BOOL_VALUE, required: bool, default: Value = nil): Cmd =
+proc flag*(
+  c: Cmd, 
+  longName: string, 
+  shortName: string = "", 
+  description: string = "", 
+  help: string = "", 
+  kind: ValueKind = BOOL_VALUE, 
+  required: bool = false, 
+  default: Value = nil
+): Cmd =
   var f = newFlag(longName, shortName, description, help, kind, required, default)
   c.flags[f.longName] = f
   return c
@@ -255,28 +264,50 @@ proc buildSubCmdHelp(c: Cmd, indent: int, parentNames: string): string =
 
   return h
 
-proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool): string =
+proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool, rootCmd: Cmdr): string =
   var name = parentNames & c.name
   var h = "Usage instructions for command: " & name & "\n\n"
   h &= "" & c.name
   if c.description != "":
     h &= ": " & c.description.trim()
 
-  h &= "\n\n"
-  h &= "" & name
+  # Build flags.
+  var flags = newSeq[Flag]()
+  # Add global flags.
+  for name, flag in rootCmd.flags:
+    # Skip non-global.
+    if not flag.global:
+      continue
+    # Skip overwritten flags.
+    if c.flags.hasKey(name):
+      continue
+    flags.add(flag)
+  # Add local flags.
   for name, flag in c.flags:
+    flags.add(flag)
+
+  h &= "\n\n"
+
+  # Show one-liner with all flags and arguments.
+
+  h &= "" & name
+
+  # Add flags.
+  for flag in flags:
     h &= " "
     if not flag.required: h &="[" 
     if flag.shortName != "": h &="-" & flag.shortName & " "
     h &= "--" & flag.longName
     if not flag.required: h &="]"
 
+  # Add arguments.
   for name, arg in c.args:
     h &= " "
     if not arg.required: h &="[" 
     h &=arg.name
     if not arg.required: h &="]" 
 
+  # Show [...] if extraArgs enabled.
   if c.extraArgs:
     h &=" [...]"
 
@@ -287,10 +318,10 @@ proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool): stri
 
     h &=c.buildSubCmdHelp(4, "")
 
-  if c.flags.len() > 0:
+  if flags.len() > 0:
     h &="\n## Flags:\n"
 
-    for name, flag in c.flags:
+    for flag in flags:
       h &="\n    * "
 
       if flag.shortName != "": h &= "-" & flag.shortName & " "
@@ -326,22 +357,29 @@ proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool): stri
 proc build(c: Cmdr) =
   # Add a help command.
 
-  var helpCmd = newCommand("help", "Show detailed usage information.", extraArgs=true)
-  helpCmd.handler = proc(args, flags: Table[string, Value], extraArgs: openArray[string]) =
-    var cmd: Cmd = c
-    var names = c.name & " "
-    if extraArgs.len() > 0:
-      for arg in extraArgs:
-        if not cmd.subcommands.hasKey(arg):
-          writeError("Can't show help for unknown subcommand '" & arg & "'")
-          quit(1) 
+  if not c.subcommands.hasKey("help"):
+    # No custom help command supplied, so add the default help.
+    var helpCmd = newCommand("help", "Show detailed usage information.", extraArgs=true)
+    helpCmd.handler = proc(args, flags: Table[string, Value], extraArgs: openArray[string]) =
+      var cmd: Cmd = c
+      var names = c.name & " "
+      if extraArgs.len() > 0:
+        for arg in extraArgs:
+          if not cmd.subcommands.hasKey(arg):
+            writeError("Can't show help for unknown subcommand '" & arg & "'")
+            quit(1) 
 
-        names &= arg & " " 
-        cmd = cmd.subcommands[arg]
+          names &= arg & " " 
+          cmd = cmd.subcommands[arg]
 
-    echo(cmd.buildHelp(names, true, true))
+      echo(cmd.buildHelp(names, true, true, c))
 
-  discard c.addCmd(helpCmd)
+    discard c.addCmd(helpCmd)
+
+  # Add -h / --help flag.
+  if not c.flags.hasKey("help"):
+    var f = newFlag("help", "h", description = "Show usage information.", global = true)
+    c.flags["help"] = f
 
 proc buildData(c: Cmdr): CmdData  =
   var data = CmdData(
@@ -394,12 +432,19 @@ proc buildData(c: Cmdr): CmdData  =
 
     of cmdLongOption:
       var name = key
-      if not cmd.flags.hasKey(name):
+
+      var flagSpec: Flag
+      if cmd.flags.hasKey(name):
+        # Local flag.
+        flagSpec = cmd.flags[name]
+      elif c.flags.hasKey(name) and c.flags[name].global:
+        # Global flag.
+        flagSpec = c.flags[name]
+      else:
         # Invalid flag.
         raise newException(ValidationError, "Unknown flag: '--" & name & "'.")
 
       # Valid flag.
-      let flagSpec = cmd.flags[name]
       var flagVal = val
       if flagSpec.kind == BOOL_VALUE and val == "":
         flagVal = "yes"
@@ -416,8 +461,13 @@ proc buildData(c: Cmdr): CmdData  =
     of cmdShortOption:
       var name = key
       var val = ""
-      let flagSpec = cmd.flagByShortName(name)
+
+      var flagSpec = cmd.flagByShortName(name)
       if flagSpec == nil:
+        var globalSpec = c.flagByShortName(name)
+        if globalSpec != nil and globalSpec.global:
+          flagSpec = globalSpec
+      if flagSpec == nil: 
          # Invalid flag.
         raise newException(ValidationError, "Unknown flag: '-" & name & "'.")
 
@@ -434,6 +484,8 @@ proc buildData(c: Cmdr): CmdData  =
         val = opts[index].key
         # Increment index to skip short option value.
         index += 1
+      else:
+        if val == "": val = "yes"
 
       # Ensure that the value is correct.
       if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
@@ -463,7 +515,23 @@ proc buildData(c: Cmdr): CmdData  =
           data.args[argSpec.name] = value
 
   # Check flags.
-  for spec in cmd.flags.values:
+
+  # Build flags.
+  var flags = newSeq[Flag]()
+  # Add global flags.
+  for name, flag in c.flags:
+    # Skip non-global.
+    if not flag.global:
+      continue
+    # Skip overwritten flags.
+    if cmd.flags.hasKey(name):
+      continue
+    flags.add(flag)
+  # Add local flags.
+  for name, flag in cmd.flags:
+    flags.add(flag)
+
+  for spec in flags:
     if not data.flags.hasKey(spec.longName):
       if spec.required:
         raise newException(ValidationError, "Missing required flag '--" & spec.longName & "'.")
@@ -492,7 +560,10 @@ proc run(c: Cmdr) =
     echo("Use -h, --help or 'help' to show usage information.")
     quit(1)
 
-  data.cmd.handler(data.args, data.flags, data.extraArgs)
+  if data.flags.hasKey("help") and data.flags["help"].boolVal:
+    echo(data.cmd.buildHelp("", true, true, c))
+  else:
+    data.cmd.handler(data.args, data.flags, data.extraArgs)
 
 #############
 # Templates #
@@ -558,6 +629,9 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
 
         template help(s: stmt): stmt {.immediate, dirty.} =
           f.help = s
+
+        template global(s: stmt): stmt {.immediate, dirty.} =
+          f.global = s
 
         template default(s: stmt): stmt {.immediate, dirty.} =
           block:
@@ -692,6 +766,7 @@ Commander:
 
     handle:
       echo("Subc handler")
+      echo(flags["help"].boolVal)
 
     Command:
       name: "subsubc"
