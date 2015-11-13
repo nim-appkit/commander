@@ -56,22 +56,22 @@ type
     of NO_VALUE:
       discard
 
-proc newValue(v: int): Value =
+proc newValue*(v: int): Value =
   Value(kind: INT_VALUE, intVal: BiggestInt(v))
 
-proc newValue(v: BiggestInt): Value =
+proc newValue*(v: BiggestInt): Value =
   Value(kind: INT_VALUE, intVal: v)
 
-proc newValue(v: float): Value =
+proc newValue*(v: float): Value =
   Value(kind: FLOAT_VALUE, floatVal: BiggestFloat(v))
 
-proc newValue(v: bool): Value =
+proc newValue*(v: bool): Value =
   Value(kind: BOOL_VALUE, boolVal: v)
 
-proc newValue(v: string): Value =
+proc newValue*(v: string): Value =
   Value(kind: STRING_VALUE, strVal: v)
 
-proc newValue(kind: ValueKind, arg, name: string): Value =
+proc newValue*(kind: ValueKind, arg, name: string): Value =
   case kind
     of INT_VALUE:
       try:
@@ -164,7 +164,7 @@ proc addCmd*(c: Cmd, subc: Cmd): Cmd =
   c.subcommands[subc.name] = subc
   return c
 
-proc handler(c: Cmd, handler: HandlerFunc) =
+proc handler*(c: Cmd, handler: HandlerFunc) =
   c.handler = handler
 
 # Flag procs.
@@ -213,7 +213,7 @@ proc flag*(
 
 # Arg procs.
 
-proc newArg(name, description, help: string = "", kind: ValueKind = STRING_VALUE, required: bool = false, default: Value = nil): Arg =
+proc newArg(name, description, help: string = "", kind: ValueKind = STRING_VALUE, required: bool = true, default: Value = nil): Arg =
   Arg(
     `name`: name,
     `description`: description,
@@ -226,7 +226,7 @@ proc newArg(name, description, help: string = "", kind: ValueKind = STRING_VALUE
 proc addArg*(c: Cmd, arg: Arg) =
   c.args[arg.name] = arg
 
-proc arg*(c: Cmd, name: string, description, help: string = "", kind: ValueKind = STRING_VALUE, required: bool = false, default: Value): Cmd =
+proc arg*(c: Cmd, name: string, description, help: string = "", kind: ValueKind = STRING_VALUE, required: bool = true, default: Value): Cmd =
   var a = newArg(name, description, help, kind, required, default)
   c.args[a.name] = a
   return c
@@ -238,7 +238,7 @@ proc flagByShortName(c: Cmd, shortName: string): Flag =
 
   return nil
 
-proc newCommand*(name, description, help: string = "", extraArgs: bool = false): Cmd =
+proc newCommand*(name, description, help: string = "", extraArgs: bool = false, handler: HandlerFunc = nil): Cmd =
   Cmd(
     `name`: name,
     `description`: description,
@@ -266,12 +266,13 @@ type CmdData = ref object of RootObj
 type Cmdr = ref object of Cmd
   discard
 
-proc newCommander*(name: string = "", description: string = "", help: string = "", extraArgs: bool = false): Cmdr =
+proc newCommander*(name: string = "", description: string = "", help: string = "", extraArgs: bool = false, handler: HandlerFunc = nil): Cmdr =
   Cmdr(
     `name`: name,
     `description`: description,
     `help`: help,
     `extraArgs`: extraArgs,
+    `handler`: handler,
     flags: initTable[string, Flag](4),
     args: initOrderedTable[string, Arg](4),
     subcommands: initTable[string, Cmd](4)
@@ -354,7 +355,7 @@ proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool, rootC
     h &=c.buildSubCmdHelp(4, "")
 
   if flags.len() > 0:
-    h &="\n## Flags:\n"
+    h &="\n## Options:\n"
 
     for flag in flags:
       h &="\n    * "
@@ -388,6 +389,10 @@ proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool, rootC
       h &= line.trim() & "\n"
 
   return h
+
+proc buildHelp*(c: Cmdr): string =
+  var cmd: Cmd = c
+  return cmd.buildHelp("", true, true, c)
 
 proc build*(c: Cmdr) =
   # Add a help command.
@@ -428,7 +433,7 @@ proc buildData(c: Cmdr): CmdData  =
   let opts = toSeq(getopt())
 
   var cmd: Cmd = c
-  let orderedArgs = toSeq(cmd.args.values)
+  var orderedArgs = toSeq(cmd.args.values)
 
   var index = 0
   while index < opts.len():
@@ -443,15 +448,15 @@ proc buildData(c: Cmdr): CmdData  =
     case kind
     of cmdArgument:
       # Handle arguments.
-
       let arg = trim(key) 
       if cmd.subcommands.contains(arg):
         # Subcommand found.
         cmd = cmd.subcommands[arg]
+        orderedArgs = toSeq(cmd.args.values)
         continue
 
       # No subcommand found, so assume a regular argument.
-      if data.args.len() < cmd.args.len():
+      if data.args.len() < orderedArgs.len():
         var argSpec = orderedArgs[data.args.len()]
         # Build argument value.
         # Note: throws exception if values are incompatible.
@@ -472,6 +477,8 @@ proc buildData(c: Cmdr): CmdData  =
     of cmdLongOption, cmdShortOption:
       var name = key
       var val = val
+
+      var flagName = if kind == cmdLongOption: "--" & name else: "-" & name
 
       if (kind == cmdLongOption and name == "help") or (kind == cmdShortOption and name == "h"):
         # Skip early for help.
@@ -497,7 +504,7 @@ proc buildData(c: Cmdr): CmdData  =
 
       if flagSpec == nil:
         # Invalid flag.
-        raise newException(ValidationError, "Unknown flag: '--" & name & "'.")
+        raise newException(ValidationError, "Unknown option: '" & flagName & "'.")
 
       # Valid flag.
       var longName = flagSpec.longName
@@ -507,7 +514,7 @@ proc buildData(c: Cmdr): CmdData  =
         if flagSpec.kind != BOOL_VALUE:
           # Check if additional arg is supplied.
           # Note: index was already incremented above!!
-          if opts.len() - 1 < index or opts[index].kind != cmdArgument:
+          if index >= opts.len() or opts[index].kind != cmdArgument:
             raise newException(ValidationError, "Missing value for option '-" & name & "'.")
 
           # Set val to value of next argument.
@@ -522,14 +529,14 @@ proc buildData(c: Cmdr): CmdData  =
       if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
         raise newException(
           ValidationError, 
-          "Must supply non-empty value for required flag '--" & longName & "' / '-'" & flagSpec.shortName & "."
+          "Must supply non-empty value for required option '" & flagName & "'" & "."
         )
 
       var finalVal: Value
       try:
         finalVal = newValue(flagSpec.kind, val, name)
       except ConversionError:
-        let msg = "Invalid value for option -$1 / --$2: $3" % [flagSpec.shortName, longName, getCurrentExceptionMsg()]
+        let msg = "Invalid value for option $1: $2" % [flagName, getCurrentExceptionMsg()]
         raise newException(ValidationError, msg)
 
       # Handle multi-flags.
@@ -546,7 +553,7 @@ proc buildData(c: Cmdr): CmdData  =
         if data.flags.hasKey(longName):
           raise newException(
             ValidationError, 
-            "Flag '--" & longName & "' / '-" & flagSpec.shortName & "' is only allowed once."
+            "Option '" & flagName & "' is only allowed once."
           )
         data.flags[longName] = finalVal
 
@@ -591,7 +598,7 @@ proc buildData(c: Cmdr): CmdData  =
   for spec in flags:
     if not data.flags.hasKey(spec.longName):
       if spec.required:
-        raise newException(ValidationError, "Missing required flag '--" & spec.longName & "'.")
+        raise newException(ValidationError, "Missing required option '--" & spec.longName & "'.")
 
       # Flag not required, so set default value.
       if spec.default != nil:
@@ -599,10 +606,17 @@ proc buildData(c: Cmdr): CmdData  =
         data.flags[spec.longName] = spec.default
       else:
         # No default value, so use the zero value.
-        var value = Value(kind: spec.kind)
-        if spec.kind == STRING_VALUE:
-          # Set empty string to prevent nil pointer problems.
-          value.strVal = ""
+        var value: Value
+        if spec.multi:
+          value = Value(kind: MULTI_VALUE)
+          # Create empty sequence to prevent access errors.
+          value.values = @[]
+        else:
+          value = Value(kind: spec.kind)
+          if spec.kind == STRING_VALUE:
+            # Set empty string to prevent nil pointer problems.
+            value.strVal = ""
+
         data.flags[spec.longName] = value
 
   data.cmd = cmd
@@ -685,6 +699,7 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
           f.global = s
 
         template default(s: stmt): stmt {.immediate, dirty.} =
+          bind newValue, `%`
           block:
             var val = newValue(s)
             if val.kind != f.kind:
@@ -727,11 +742,12 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
           a.help = s
 
         template default(s: stmt): stmt {.immediate, dirty.} =
+          bind newValue, `%`
           block:
             var val = newValue(s)
             if val.kind != a.kind:
               raise newException(Exception, "Invalid type for for default value of argument $1: got $2 instead of $3" % [a.name, val.kind.`$`, a.kind.`$`])
-            f.default = val
+            a.default = val
 
         argBody
 
