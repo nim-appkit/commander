@@ -266,7 +266,7 @@ cmdr.run()
 
 ### Changelog
 
-[Changelog](https://github.com/theduke/nim-commander/blob/master/CHANGELOG.txt)
+[Changelog](https://github.com/theduke/nim-commander/blob/master/CHANGELOG.md)
 
 ### TODO
 
