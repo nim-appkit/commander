@@ -1,6 +1,6 @@
 # nim-commander
 
-Commander is a command-line library for effortlessing creation of command line applications in the [Nim language](http://nim-lang.org).
+Commander is a command-line library for effortless creation of command line applications in the [Nim language](http://nim-lang.org).
 
 ## Features
 
@@ -74,6 +74,7 @@ ls --help
 ls # => Error: Missing required argument "path"
 ls /my/path => Prints "Listing files in directory /my/path"
 ls -a /my/path => Prints "Listing..." + "Listing all files"
+```
 
 Check out the next example for a more complex setup with nested sub commands, 
 different argument types, etc.
@@ -180,6 +181,7 @@ Commander:
 cmdr.run()
 ```
 
+
 ## Documentation
 
 ### Commander
@@ -275,7 +277,7 @@ cmdr.run()
 
 ### Versioning
 
-This project follows [SemVer](semver.org).
+This project follows [SemVer](http://semver.org).
 
 ### License.
 
