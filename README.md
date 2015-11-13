@@ -2,6 +2,11 @@
 
 Commander is a command-line library for effortless creation of command line applications in the [Nim language](http://nim-lang.org).
 
+## Notice
+
+**Commander is still in an early stage, and the syntax of the DSL will change quite a bit.**
+**Use with caution.**
+
 ## Features
 
 * Git-style nested subcommands with arbitrary depth.
