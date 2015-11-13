@@ -16,7 +16,7 @@ proc trim(s: string): string =
     break
   
   # Trim right.
-  var i = n.len() -1
+  var i = n.len() - 1
   while i >= 0:
     if n[i] in Whitespace or n[i] in NewLines:
       i -= 1
@@ -29,8 +29,11 @@ proc trim(s: string): string =
 type ValidationError = object of Exception
   discard
 
+type ConversionError = object of Exception
+  discard
+
 type
-  ValueKind = enum
+  ValueKind* = enum
     NO_VALUE 
     INT_VALUE
     FLOAT_VALUE
@@ -38,18 +41,18 @@ type
     BOOL_VALUE
     MULTI_VALUE
 
-  Value = ref object
+  Value* = ref object
     case kind: ValueKind
     of INT_VALUE:
-      intVal: BiggestInt
+      intVal*: BiggestInt
     of FLOAT_VALUE:
-      floatVal: BiggestFloat
+      floatVal*: BiggestFloat
     of STRING_VALUE:
-      strVal: string
+      strVal*: string
     of BOOL_VALUE:
-      boolVal: bool
+      boolVal*: bool
     of MULTI_VALUE:
-      values: seq[Value]
+      values*: seq[Value]
     of NO_VALUE:
       discard
 
@@ -75,14 +78,14 @@ proc newValue(kind: ValueKind, arg, name: string): Value =
         var i = parseBiggestInt(arg)
         return newValue(i)
       except:
-        raise newException(ValidationError, "Argument $2 must be a number." % [name])
+        raise newException(ConversionError, "$1 is not a number." % [arg])
 
     of FLOAT_VALUE:
       try:
         var f = parseFloat(arg)
         return newValue(f)
       except:
-        raise newException(ValidationError, "Argument $2 must be a decimal number." % [name])
+        raise newException(ConversionError, "$1 is not a decimal number." % [arg])
 
     of STRING_VALUE:
       return newValue(arg)
@@ -95,8 +98,8 @@ proc newValue(kind: ValueKind, arg, name: string): Value =
         return newValue(false)
       else:
         raise newException(
-          Exception, 
-          "Argument $2 must be a yes/no value. (yes/no, y/n, true/false, 1/0)." % [name]
+          ConversionError, 
+          "'$1' must be a yes/no value. (yes/no, y/n, true/false, 1/0)." % [arg]
         )
     of MULTI_VALUE:
       assert(false) # Should never happen.
@@ -130,11 +133,11 @@ type HandlerFunc = proc(args, flags: Table[string, Value], extraArgs: openArray[
 ########
 
 
-type Cmd = ref object of RootObj
+type Cmd* = ref object of RootObj
   name: string
   description: string
   help: string
-  flags: Table[string, Flag]
+  flags*: Table[string, Flag]
   args: OrderedTable[string, Arg]
   extraArgs: bool
   handler: HandlerFunc
@@ -157,7 +160,7 @@ proc extraArgs*(c: Cmd, allow: bool): Cmd =
   c.extraArgs = allow
   return c
 
-proc addCmd(c: Cmd, subc: Cmd): Cmd =
+proc addCmd*(c: Cmd, subc: Cmd): Cmd =
   c.subcommands[subc.name] = subc
   return c
 
@@ -189,6 +192,9 @@ proc newFlag(
     `global`: global
   )
 
+proc addFlag*(c: Cmd, f: Flag) =
+  c.flags[f.longName] = f
+
 proc flag*(
   c: Cmd, 
   longName: string, 
@@ -217,6 +223,9 @@ proc newArg(name, description, help: string = "", kind: ValueKind = STRING_VALUE
     `default`: default
   )
 
+proc addArg*(c: Cmd, arg: Arg) =
+  c.args[arg.name] = arg
+
 proc arg*(c: Cmd, name: string, description, help: string = "", kind: ValueKind = STRING_VALUE, required: bool = false, default: Value): Cmd =
   var a = newArg(name, description, help, kind, required, default)
   c.args[a.name] = a
@@ -229,7 +238,7 @@ proc flagByShortName(c: Cmd, shortName: string): Flag =
 
   return nil
 
-proc newCommand*(name: string, description, help: string = "", extraArgs: bool = false): Cmd =
+proc newCommand*(name, description, help: string = "", extraArgs: bool = false): Cmd =
   Cmd(
     `name`: name,
     `description`: description,
@@ -257,7 +266,7 @@ type CmdData = ref object of RootObj
 type Cmdr = ref object of Cmd
   discard
 
-proc newCommander*(name: string, description, help: string = "", extraArgs: bool = false): Cmdr =
+proc newCommander*(name: string = "", description: string = "", help: string = "", extraArgs: bool = false): Cmdr =
   Cmdr(
     `name`: name,
     `description`: description,
@@ -275,6 +284,8 @@ proc buildSubCmdHelp(c: Cmd, indent: int, parentNames: string): string =
   var h = ""
   var pref = " ".repeat(indent)
   for name, cmd in c.subcommands:
+    if name == "help":
+      continue
     h &= pref & "* " & cmd.name
     if cmd.description != "": h &=": " & cmd.description
     h &= "\n"
@@ -332,7 +343,12 @@ proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool, rootC
 
   h &= "\n\n"
 
-  if subCmds and c.subcommands.len() > 0:
+  let haveHelpCmd = c.subcommands.hasKey("help")
+  var subcommandCount = c.subcommands.len()
+  if haveHelpCmd:
+    subcommandCount -= 1
+
+  if subCmds and subcommandCount > 0:
     h &="## Subcommands:\n\n"
 
     h &=c.buildSubCmdHelp(4, "")
@@ -373,7 +389,7 @@ proc buildHelp(c: Cmd, parentNames: string, detailed: bool, subCmds: bool, rootC
 
   return h
 
-proc build(c: Cmdr) =
+proc build*(c: Cmdr) =
   # Add a help command.
 
   if not c.subcommands.hasKey("help"):
@@ -439,7 +455,11 @@ proc buildData(c: Cmdr): CmdData  =
         var argSpec = orderedArgs[data.args.len()]
         # Build argument value.
         # Note: throws exception if values are incompatible.
-        data.args[argSpec.name] = newValue(argSpec.kind, arg, argSpec.name)
+        try:
+          data.args[argSpec.name] = newValue(argSpec.kind, arg, argSpec.name)
+        except ConversionError:
+          let msg = "Invalid value for argument $1: $2" % [argSpec.name, getCurrentExceptionMsg()]
+          raise newException(ValidationError, msg)
       else:
         # No more arguments configured.
         if cmd.extraArgs:
@@ -487,8 +507,8 @@ proc buildData(c: Cmdr): CmdData  =
         if flagSpec.kind != BOOL_VALUE:
           # Check if additional arg is supplied.
           # Note: index was already incremented above!!
-          if opts.len() < index or opts[index].kind != cmdArgument:
-            raise newException(Exception, "Missing value for option '-" & name & "'.")
+          if opts.len() - 1 < index or opts[index].kind != cmdArgument:
+            raise newException(ValidationError, "Missing value for option '-" & name & "'.")
 
           # Set val to value of next argument.
           val = opts[index].key
@@ -505,7 +525,12 @@ proc buildData(c: Cmdr): CmdData  =
           "Must supply non-empty value for required flag '--" & longName & "' / '-'" & flagSpec.shortName & "."
         )
 
-      var finalVal = newValue(flagSpec.kind, val, name)
+      var finalVal: Value
+      try:
+        finalVal = newValue(flagSpec.kind, val, name)
+      except ConversionError:
+        let msg = "Invalid value for option -$1 / --$2: $3" % [flagSpec.shortName, longName, getCurrentExceptionMsg()]
+        raise newException(ValidationError, msg)
 
       # Handle multi-flags.
       if flagSpec.multi:
@@ -583,7 +608,7 @@ proc buildData(c: Cmdr): CmdData  =
   data.cmd = cmd
   return data
 
-proc run(c: Cmdr) =
+proc run*(c: Cmdr) =
   var data: CmdData
   try:
     data = c.buildData()
@@ -602,23 +627,13 @@ proc run(c: Cmdr) =
 #############
 
 template Commander*(body: stmt): stmt {.immediate, dirty.} =
-  var cmdr = Cmdr(
-    name: "",
-    description: "",
-    help: "",
-    extraArgs: false,
-    flags: initTable[string, Flag](4),
-    args: initOrderedTable[string, Arg](4),
-    subcommands: initTable[string, Cmd](4)
-  )
-
+  bind newCommander, Cmdr
+  var cmdr = newCommander()
   cmdr.extend:
     body
 
-macro setupHandler(cmd: expr): stmt =
-  result = newStmtList()
-
 template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
+  bind Cmd
   block:
     var parentCommand: Cmd = cmdr
     template name(s: stmt): stmt {.immediate, dirty.} =
@@ -636,12 +651,13 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
 
     template handle(handlerBody: stmt): stmt {.immediate, dirty.} =
       block:
-        setupHandler(parentCommand)
-        parentCommand.handler = proc(args, flags: Table[string, Value], extraArgs: openArray[string]) =
+        bind tables
+        parentCommand.handler = proc(args: tables.Table[string, commander.Value], flags: tables.Table[string, commander.Value], extraArgs: openArray[string]) =
           handlerBody
 
     template flag(flagBody: stmt): stmt {.immediate, dirty.} =
       block:
+        bind newFlag
         var f = newFlag()
 
         template longName(s: stmt): stmt {.immediate, dirty.} =
@@ -672,23 +688,27 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
           block:
             var val = newValue(s)
             if val.kind != f.kind:
-              raise newException(ValidationError, "Invalid type for for default value of flag $1: got $2 instead of $3" % [f.longName, val.kind.`$`, f.kind.`$`])
+              raise newException(Exception, "Invalid type for for default value of flag $1: got $2 instead of $3" % [f.longName, val.kind.`$`, f.kind.`$`])
 
             f.default = val
 
         flagBody
 
+        bind `%`, contains
         if f.longName == "":
-          raise newException(ValidationError, "Must set a longName for flags (command $1)!" % [parentCommand.name])
+          raise newException( Exception, "Must set a longName for flags (command $1)!" % [parentCommand.name])
         if parentCommand.flags.contains(f.longName):
-          raise newException(ValidationError, "Duplicate flag longName '$1' for command $2" % [f.longName, parentCommand.name])
+          raise newException(Exception, "Duplicate flag longName '$1' for command $2" % [f.longName, parentCommand.name])
         if parentCommand.args.contains(f.longName):
-          raise newException(ValidationError, "Cant specify a flag with a longName that exists as argument (command $1, flag $2)" % [parentCommand.name, f.longName])
+          let msg = "Cant specify a flag with a longName that exists as argument (command $1, flag $2)"
+          raise newException(Exception, msg  % [parentCommand.name, f.longName])
 
-        parentCommand.flags[f.longName] = f
+        bind addFlag 
+        parentCommand.addFlag(f)
 
     template arg(argBody: stmt): stmt {.immediate, dirty.} =
       block:
+        bind newArg
         var a = newArg()
 
         template name(s: stmt): stmt {.immediate, dirty.} =
@@ -710,31 +730,23 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
           block:
             var val = newValue(s)
             if val.kind != a.kind:
-              raise newException(ValidationError, "Invalid type for for default value of argument $1: got $2 instead of $3" % [a.name, val.kind.`$`, a.kind.`$`])
+              raise newException(Exception, "Invalid type for for default value of argument $1: got $2 instead of $3" % [a.name, val.kind.`$`, a.kind.`$`])
             f.default = val
 
         argBody
 
         if a.name == "":
-          raise newException(ValidationError, "Must set a name for arguments (command $1)!" % [parentCommand.name])
+          raise newException(Exception, "Must set a name for arguments (command $1)!" % [parentCommand.name])
         if parentCommand.args.contains(a.name):
-          raise newException(ValidationError, "Duplicate argument name '$1' for command $2" % [a.name, parentCommand.name])
+          raise newException(Exception, "Duplicate argument name '$1' for command $2" % [a.name, parentCommand.name])
         if parentCommand.flags.contains(a.name):
-          raise newException(ValidationError, "Cant specify an argument with a name that exists as argument longName (command $1, arg $2)" % [parentCommand.name, a.name])
+          raise newException(Exception, "Cant specify an argument with a name that exists as argument longName (command $1, arg $2)" % [parentCommand.name, a.name])
 
-        parentCommand.args[a.name] = a
+        parentCommand.addArg(a)
 
     template Command(cmdBody: stmt): stmt {.immediate, dirty.} =
       block:
-        var cmd = Cmd(
-          name: "",
-          description: "",
-          help: "",
-          extraArgs: false,
-          flags: initTable[string, Flag](4),
-          args: initOrderedTable[string, Arg](4),
-          subcommands: initTable[string, Cmd](4)
-        )
+        var cmd = newCommand()
         var oldParent = parentCommand
         var parentCommand = cmd
 
@@ -750,65 +762,3 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
 
     cmdr.build()
 
-Commander:
-  name: "main"
-  description: """
-  long description
-  """
-
-  help: """
-  long 
-  multiline
-   help 
-   text!
-  """
-
-  flag:
-    longName: "lala"
-    shortName: "l"
-    required: true
-    description: "flag description"
-    kind: STRING_VALUE
-    multi: true
-    help:
-      """Long 
-      multiline
-      help
-      text"""
-
-  flag:
-    longName: "flag2"
-
-  arg:
-    name: "name"
-    description: "descr"
-    required: true
-    help: """Long
-    multin
-    help
-    text"""
-
-  arg:
-    name: "otherarg"
-
-  handle:
-    echo(flags["lala"].values[1].strVal)
-
-  extraArgs: true
-
-  Command:
-    name: "subc"
-    help: "sub help"
-
-    handle:
-      echo("Subc handler")
-      echo(flags["help"].boolVal)
-
-    Command:
-      name: "subsubc"
-      help: "lala"
-
-      handle:
-        echo("sub sub c handler")
-
-cmdr.run()
