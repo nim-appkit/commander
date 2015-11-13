@@ -36,6 +36,7 @@ type
     FLOAT_VALUE
     STRING_VALUE
     BOOL_VALUE
+    MULTI_VALUE
 
   Value = ref object
     case kind: ValueKind
@@ -47,6 +48,8 @@ type
       strVal: string
     of BOOL_VALUE:
       boolVal: bool
+    of MULTI_VALUE:
+      values: seq[Value]
     of NO_VALUE:
       discard
 
@@ -95,6 +98,8 @@ proc newValue(kind: ValueKind, arg, name: string): Value =
           Exception, 
           "Argument $2 must be a yes/no value. (yes/no, y/n, true/false, 1/0)." % [name]
         )
+    of MULTI_VALUE:
+      assert(false) # Should never happen.
     of NO_VALUE:
       return Value(kind: NO_VALUE)
 
@@ -106,6 +111,7 @@ type Flag = ref object
   kind: ValueKind
   required: bool
   default: Value
+  multi: bool
   global: bool
 
 type Arg = ref object
@@ -160,7 +166,17 @@ proc handler(c: Cmd, handler: HandlerFunc) =
 
 # Flag procs.
 
-proc newFlag(longName, shortName, description, help: string = "", kind: ValueKind = BOOL_VALUE, required: bool = false, default: Value = nil, global: bool = false): Flag =
+proc newFlag(
+  longName: string = "", 
+  shortName: string = "", 
+  description: string = "", 
+  help: string = "", 
+  kind: ValueKind = BOOL_VALUE, 
+  required: bool = false, 
+  default: Value = nil,
+  multi: bool = false,
+  global: bool = false
+): Flag =
   Flag(
     `longName`: longName, 
     `shortName`: shortName,
@@ -169,6 +185,7 @@ proc newFlag(longName, shortName, description, help: string = "", kind: ValueKin
     `kind`: kind, 
     `required`: required,
     `default`: default,
+    `multi`: multi,
     `global`: global
   )
 
@@ -179,10 +196,12 @@ proc flag*(
   description: string = "", 
   help: string = "", 
   kind: ValueKind = BOOL_VALUE, 
-  required: bool = false, 
-  default: Value = nil
+  required: bool = false,
+  default: Value = nil,
+  multi: bool = false,
+  global: bool = false
 ): Cmd =
-  var f = newFlag(longName, shortName, description, help, kind, required, default)
+  var f = newFlag(longName, shortName, description, help, kind, required, default, multi, global)
   c.flags[f.longName] = f
   return c
 
@@ -430,68 +449,81 @@ proc buildData(c: Cmdr): CmdData  =
           # Invalid extra argument.
           raise newException(ValidationError, "Invalid extra argument '" & arg & "'.")
 
-    of cmdLongOption:
+    of cmdLongOption, cmdShortOption:
       var name = key
+      var val = val
 
+      if (kind == cmdLongOption and name == "help") or (kind == cmdShortOption and name == "h"):
+        # Skip early for help.
+        data.flags["help"] = newValue(true)
+        data.cmd = cmd
+        return data
+
+      # Find flag spec.
       var flagSpec: Flag
-      if cmd.flags.hasKey(name):
-        # Local flag.
-        flagSpec = cmd.flags[name]
-      elif c.flags.hasKey(name) and c.flags[name].global:
-        # Global flag.
-        flagSpec = c.flags[name]
+      if kind == cmdShortOption:
+        flagSpec = cmd.flagByShortName(name)
+        if flagSpec == nil:
+          var globalSpec = c.flagByShortName(name)
+          if globalSpec != nil and globalSpec.global:
+            flagSpec = globalSpec 
       else:
+        if cmd.flags.hasKey(name):
+          # Local flag.
+          flagSpec = cmd.flags[name]
+        elif c.flags.hasKey(name) and c.flags[name].global:
+          # Global flag.
+          flagSpec = c.flags[name]
+
+      if flagSpec == nil:
         # Invalid flag.
         raise newException(ValidationError, "Unknown flag: '--" & name & "'.")
 
       # Valid flag.
-      var flagVal = val
+      var longName = flagSpec.longName
+
+      # For short options, determine the value.
+      if kind == cmdShortOption:
+        if flagSpec.kind != BOOL_VALUE:
+          # Check if additional arg is supplied.
+          # Note: index was already incremented above!!
+          if opts.len() < index or opts[index].kind != cmdArgument:
+            raise newException(Exception, "Missing value for option '-" & name & "'.")
+
+          # Set val to value of next argument.
+          val = opts[index].key
+          # Increment index to skip short option value.
+          index += 1
+
       if flagSpec.kind == BOOL_VALUE and val == "":
-        flagVal = "yes"
+        val = "yes"
 
       # Ensure that the value is correct.
       if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
         raise newException(
           ValidationError, 
-          "Must supply non-empty value for required flag '--" & flagSpec.longName & "'."
+          "Must supply non-empty value for required flag '--" & longName & "' / '-'" & flagSpec.shortName & "."
         )
 
-      data.flags[name] = newValue(flagSpec.kind, flagVal, name)
+      var finalVal = newValue(flagSpec.kind, val, name)
 
-    of cmdShortOption:
-      var name = key
-      var val = ""
-
-      var flagSpec = cmd.flagByShortName(name)
-      if flagSpec == nil:
-        var globalSpec = c.flagByShortName(name)
-        if globalSpec != nil and globalSpec.global:
-          flagSpec = globalSpec
-      if flagSpec == nil: 
-         # Invalid flag.
-        raise newException(ValidationError, "Unknown flag: '-" & name & "'.")
-
-      # Valid flag.
-      
-      # Check if we need a value.
-      if flagSpec.kind != BOOL_VALUE:
-        # Check if additional arg is supplied.
-        # Note: index was already incremented above!!
-        if opts.len() < index or opts[index].kind != cmdArgument:
-          raise newException(Exception, "Missing value for option '-" & flagSpec.shortName & "'.")
-
-        # Set val to value of next argument.
-        val = opts[index].key
-        # Increment index to skip short option value.
-        index += 1
+      # Handle multi-flags.
+      if flagSpec.multi:
+        # Multi flag.
+        if not data.flags.hasKey(longName):
+          # First time the flag was supplied, so build a new multi value.
+          var multi = Value(kind: MULTI_VALUE)
+          multi.values = newSeq[Value]()
+          data.flags[longName] = multi
+        data.flags[longName].values.add(finalVal)
       else:
-        if val == "": val = "yes"
-
-      # Ensure that the value is correct.
-      if flagSpec.kind == STRING_VALUE and flagSpec.required and val == "":
-        raise newException(ValidationError, "Must supply non-empty value for required flag '-" & name & "'.")
-
-      data.flags[flagSpec.longName] = newValue(flagSpec.kind, val, name)
+        # Not multi, so verify that it was not already defined.
+        if data.flags.hasKey(longName):
+          raise newException(
+            ValidationError, 
+            "Flag '--" & longName & "' / '-" & flagSpec.shortName & "' is only allowed once."
+          )
+        data.flags[longName] = finalVal
 
     of cmdEnd:  assert(false) # cannot happen 
 
@@ -630,6 +662,9 @@ template extend*(cmdr: Cmdr, body: stmt): stmt {.immediate, dirty.} =
         template help(s: stmt): stmt {.immediate, dirty.} =
           f.help = s
 
+        template multi(s: stmt): stmt {.immediate, dirty.} =
+          f.multi = s
+
         template global(s: stmt): stmt {.immediate, dirty.} =
           f.global = s
 
@@ -734,6 +769,7 @@ Commander:
     required: true
     description: "flag description"
     kind: STRING_VALUE
+    multi: true
     help:
       """Long 
       multiline
@@ -756,7 +792,7 @@ Commander:
     name: "otherarg"
 
   handle:
-    echo(flags["lala"].strVal)
+    echo(flags["lala"].values[1].strVal)
 
   extraArgs: true
 
