@@ -275,6 +275,9 @@ cmdr.run()
 
 ### TODO
 
+- [ ] Improve DSL.
+- [ ] arg/args shortcuts.
+- [ ] Define arg/flag vars in scope.
 - [ ] Finish writing documentation.
 - [ ] Extendable autocomplete support.
 - [ ] Write tests. 
